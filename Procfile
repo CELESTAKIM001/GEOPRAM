@@ -1,0 +1,1 @@
+web: gunicorn geopram_tech.wsgi --chdir .

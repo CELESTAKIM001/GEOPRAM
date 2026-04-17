@@ -276,7 +276,7 @@ This document defines the High Availability requirements for the GEOPRAM TECHNOL
 # Multiple instances behind load balancer
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 USE_X_FORWARDED_HOST = True
-ALLOWED_HOSTS = ['www.geopram.com', 'api.geopram.com', 'dashboard.geopram.com']
+ALLOWED_HOSTS = ['www.geopramtech.com', 'api.geopramtech.com', 'dashboard.geopramtech.com']
 
 # Database connection retry
 DATABASES = {
@@ -306,7 +306,7 @@ SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_AGE = 7200  # 2 hours
 
 # Static files (CDN)
-STATIC_URL = 'https://cdn.geopram.com/static/'
+STATIC_URL = 'https://cdn.geopramtech.com/static/'
 STORAGES = {
     'staticfiles': {
         'BACKEND': 'django.core.files.storage.FileSystemStorage',
@@ -321,7 +321,7 @@ STORAGES = {
 
 ## Appendix B: Health Check Endpoint
 
-Create `geopram/health/` view:
+Create `geopram_tech/health/` view:
 
 ```python
 from django.http import JsonResponse
@@ -372,11 +372,11 @@ upstream django_backend {
 
 server {
     listen 443 ssl http2;
-    server_name www.geopram.com;
+    server_name www.geopramtech.com;
     
     # SSL configuration
-    ssl_certificate /etc/ssl/certs/geopram.crt;
-    ssl_certificate_key /etc/ssl/private/geopram.key;
+    ssl_certificate /etc/ssl/certs/geopramtech.crt;
+    ssl_certificate_key /etc/ssl/private/geopramtech.key;
     ssl_protocols TLSv1.3 TLSv1.2;
     
     # Security headers
@@ -408,8 +408,625 @@ server {
 
 ---
 
+## 16. WSGI & Application Server Configuration
+
+### 16.1 WSGI Server Requirements
+
+- **[REQ-HA-078]** Use **Gunicorn** or **uWSGI** as WSGI application server with multiple worker processes
+- **[REQ-HA-079]** Configure **pre-fork model**: (2 × CPU cores) + 1 workers per instance
+- **[REQ-HA-080]** Set worker timeout to 120 seconds, graceful timeout to 30 seconds
+- **[REQ-HA-081]** Implement **max requests** of 10,000 with **max requests jitter** of 1,000 to prevent memory leaks
+- **[REQ-HA-082]** Enable **worker lifecycle logging** for debugging
+- **[REQ-HA-083]** Use **shared sockets** (Unix domain socket or TCP) behind load balancer
+
+### 16.2 Gunicorn Configuration
+
+Create `gunicorn.conf.py`:
+
+```python
+import multiprocessing
+import os
+
+# Server socket
+bind = os.getenv('GUNICORN_BIND', '0.0.0.0:8000')
+backlog = 2048
+
+# Worker processes
+workers = multiprocessing.cpu_count() * 2 + 1
+worker_class = os.getenv('GUNICORN_WORKER_CLASS', 'sync')
+worker_connections = 1000
+max_requests = 10000
+max_requests_jitter = 1000
+timeout = 120
+graceful_timeout = 30
+keepalive = 5
+
+# Logging
+errorlog = '-'
+loglevel = 'warning'
+accesslog = '-'
+access_log_format = '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s" %(D)s'
+
+# Process naming
+proc_name = 'geopram_tech-gunicorn'
+
+# Server mechanics
+daemon = False
+raw_env = ['DJANGO_SETTINGS_MODULE=geopram_tech.settings.production']
+pidfile = '/run/gunicorn/geopramtech.pid'
+user = os.getenv('GUNICORN_USER', 'www-data')
+group = os.getenv('GUNICORN_GROUP', 'www-data')
+
+# SSL configuration (if terminating at Gunicorn)
+# keyfile = '/etc/ssl/private/geopramtech.key'
+# certfile = '/etc/ssl/certs/geopramtech.crt'
+```
+
+### 16.3 uWSGI Configuration
+
+Create `uwsgi.ini`:
+
+```ini
+[uwsgi]
+# Django project
+project = geopramtech
+base = /app
+
+chdir = %(base)
+home = /app/.venv
+module = %(project).wsgi:application
+
+# Master & processes
+master = true
+processes = %(%k * 2 + 1)
+
+# Socket
+socket = /run/uwsgi/geopramtech.sock
+chmod-socket = 660
+vacuum = true
+die-on-term = true
+
+# Limits
+harakiri = 120
+harakiri-verbose = true
+limit-as = 512
+
+# Request handling
+buffer-size = 32768
+post-buffering = 8192
+
+# Stats
+stats = /run/uwsgi/geopramtech.stats
+
+# Logging
+logto = /var/log/uwsgi/%n.log
+log-4xx = true
+log-5xx = true
+
+# Background tasks (spooler)
+spooler = /var/spool/uwsgi
+```
+
+### 16.4 Systemd Service (Gunicorn)
+
+Create `/etc/systemd/system/geopramtech.service`:
+
+```systemd
+[Unit]
+Description=GEOPRAMTECH Django Gunicorn Service
+Documentation=https://geopramtech.com
+After=network.target postgresql.service redis.service
+Wants=network.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+
+# User & Group
+User=www-data
+Group=www-data
+
+# Working directory
+WorkingDirectory=/app/geopramtech
+
+# Environment
+Environment="DJANGO_SETTINGS_MODULE=geopram_tech.settings.production"
+Environment="PYTHONPATH=/app"
+
+# ExecStart
+ExecStart=/app/.venv/bin/gunicorn \
+    --config /app/gunicorn.conf.py \
+    --preload \
+    geopram_tech.wsgi:application
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+# Limits
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Security hardening
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/app /var/log/geopramtech /run/gunicorn
+NoNewPrivileges=true
+PrivateDevices=true
+
+# Timeout
+TimeoutStartSec=60
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGQUIT
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Systemd commands:**
+
+```bash
+# Start & enable
+sudo systemctl daemon-reload
+sudo systemctl start geopram
+sudo systemctl enable geopram
+
+# Status & logs
+sudo systemctl status geopram
+sudo journalctl -u geopram -f
+
+# Restart
+sudo systemctl restart geopram
+```
+
+### 16.5 Supervisor Configuration (Alternative)
+
+Create `/etc/supervisor/conf.d/geopram.conf`:
+
+```ini
+[program:geopram]
+command=/app/.venv/bin/gunicorn --config /app/gunicorn.conf.py geopram.wsgi:application
+directory=/app/geopramtech
+user=www-data
+autostart=true
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/var/log/geopramtech/gunicorn.log
+stdout_logfile_maxbytes=50MB
+stdout_logfile_backups=10
+stopwaitsecs=120
+killasgroup=true
+```
+
+**Supervisor commands:**
+
+```bash
+sudo supervisorctl reread
+sudo supervisorctl update
+sudo supervisorctl status geopramtech
+sudo supervisorctl restart geopramtech
+```
+
+### 16.6 Nginx + Gunicorn Integration
+
+Nginx config for proxying to Gunicorn Unix socket:
+
+```nginx
+upstream geopramtech_backend {
+    # Unix socket (preferred)
+    server unix:/run/gunicorn/geopramtech.sock fail_timeout=0;
+    
+    # Or TCP for distributed deployments
+    # server 127.0.0.1:8000 fail_timeout=0;
+}
+
+server {
+    listen 80;
+    server_name www.geopramtech.com geopramtech.com;
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name www.geopramtech.com;
+    
+    # SSL (managed by Let's Encrypt/CloudFlare)
+    ssl_certificate /etc/ssl/certs/geopramtech.crt;
+    ssl_certificate_key /etc/ssl/private/geopramtech.key;
+    ssl_protocols TLSv1.3 TLSv1.2;
+    ssl_ciphers ECDHE-RSA-AES256-GCM-SHA512:DHE-RSA-AES256-GCM-SHA512;
+    ssl_prefer_server_ciphers off;
+    
+    # Security headers
+    add_header X-Frame-Options DENY always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    
+    # Client max body size (for uploads)
+    client_max_body_size 50M;
+    
+    # Static files (served directly by Nginx)
+    location /static/ {
+        alias /app/staticfiles/;
+        expires 1y;
+        add_header Cache-Control "public, immutable, max-age=31536000";
+        add_header Vary "Accept-Encoding";
+        access_log off;
+        try_files $uri $uri/ =404;
+    }
+    
+    # Media files
+    location /media/ {
+        alias /app/media/;
+        expires 7d;
+        add_header Cache-Control "public, max-age=604800";
+        try_files $uri $uri/ =404;
+    }
+    
+    # Health check endpoint
+    location /health/ {
+        access_log off;
+        proxy_pass http://geopramtech_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 3s;
+        proxy_send_timeout 5s;
+        proxy_read_timeout 5s;
+    }
+    
+    # Main application (Django)
+    location / {
+        proxy_pass http://geopramtech_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $server_name;
+        
+        # Connection settings
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+        proxy_buffering on;
+        proxy_buffer_size 4k;
+        proxy_buffers 4 32k;
+        proxy_busy_buffers_size 64k;
+        
+        # Keepalive
+        keepalive_timeout 65;
+        keepalive_requests 1000;
+        
+        # WebSocket support (if using channels)
+        # proxy_http_version 1.1;
+        # proxy_set_header Upgrade $http_upgrade;
+        # proxy_set_header Connection "upgrade";
+    }
+    
+    # Deny access to sensitive files
+    location ~ /\.(?!well-known) {
+        deny all;
+        log_not_found off;
+    }
+    
+    location ~ ~$ {
+        deny all;
+        log_not_found off;
+    }
+}
+```
+
+### 16.7 Docker Deployment
+
+`Dockerfile`:
+
+```dockerfile
+FROM python:3.11-slim-bookworm
+
+# System dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libpq-dev \
+    gcc \
+    nginx \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create user
+RUN useradd -m -d /app geopramtech && chown -R geopramtech:geopramtech /app
+
+# Python dependencies
+COPY requirements.txt /app/
+WORKDIR /app
+RUN pip install --no-cache-dir -r requirements.txt gunicorn
+
+# Copy code
+COPY . /app/
+RUN chown -R geopram:geopram /app
+
+# Collect static
+USER geopram
+RUN python manage.py collectstatic --noinput
+
+# Nginx config
+USER root
+COPY nginx.conf /etc/nginx/nginx.conf
+RUN chown -R geopram:geopram /var/log/nginx /var/cache/nginx
+
+USER geopram
+
+EXPOSE 8000
+CMD ["sh", "-c", "gunicorn --config gunicorn.conf.py geopram_tech.wsgi:application"]
+```
+
+`docker-compose.yml` (production):
+
+```yaml
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: geopramtech
+      POSTGRES_USER: geopramtech
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backups:/backups
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  web:
+    build: .
+    command: gunicorn --config gunicorn.conf.py geopram_tech.wsgi:application
+    environment:
+      DATABASE_URL: postgres://geopramtech:${DB_PASSWORD}@postgres/geopramtech
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY}
+      DEBUG: "False"
+    volumes:
+      - static_volume:/app/staticfiles
+      - media_volume:/app/media
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    expose:
+      - 8000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - static_volume:/static
+      - media_volume:/media
+      - ./nginx.conf:/etc/nginx/nginx.conf
+      - ./ssl:/etc/ssl/certs
+    depends_on:
+      - web
+    restart: unless-stopped
+
+  celery:
+    build: .
+    command: celery -A geopram_tech worker -l info --concurrency=4
+    environment:
+      DATABASE_URL: postgres://geopramtech:${DB_PASSWORD}@postgres/geopramtech
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  static_volume:
+  media_volume:
+```
+
+### 16.8 Kubernetes Deployment
+
+`deployment.yaml` (1 replica controlled by HPA):
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: geopramtech-web
+  namespace: production
+  labels:
+    app: geopramtech
+    tier: web
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: geopramtech
+      tier: web
+  template:
+    metadata:
+      labels:
+        app: geopramtech
+        tier: web
+    spec:
+      containers:
+      - name: geopramtech
+        image: geopramtech/geopramtech:${IMAGE_TAG}
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+         env:
+        - name: DJANGO_SETTINGS_MODULE
+          value: "geopram_tech.settings.production"
+         - name: DATABASE_URL
+           valueFrom:
+             secretKeyRef:
+               name: geopramtech-secrets
+               key: database-url
+         - name: SECRET_KEY
+           valueFrom:
+             secretKeyRef:
+               name: geopramtech-secrets
+               key: secret-key
+         - name: REDIS_URL
+           valueFrom:
+             secretKeyRef:
+               name: geopramtech-secrets
+               key: redis-url
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        livenessProbe:
+          httpGet:
+            path: /health/
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health/
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+        startupProbe:
+          httpGet:
+            path: /health/
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 30
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 30"]
+         volumeMounts:
+         - name: static-storage
+           mountPath: /app/staticfiles
+       volumes:
+       - name: static-storage
+         emptyDir: {}
+       - name: django-settings
+         secret:
+           secretName: geopramtech-settings
+      imagePullSecrets:
+      - name: registry-secret
+```
+
+`hpa.yaml` (Horizontal Pod Autoscaler):
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: geopramtech-web-hpa
+  namespace: production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: geopramtech-web
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 30
+      - type: Pods
+        value: 2
+        periodSeconds: 30
+      selectPolicy: Max
+```
+
+`service.yaml` (LoadBalancer service):
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: geopramtech-web
+  namespace: production
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-interval: "30"
+spec:
+  selector:
+    app: geopramtech
+    tier: web
+  ports:
+  - port: 80
+    targetPort: 8000
+    protocol: TCP
+  type: LoadBalancer
+  sessionAffinity: ClientIP
+  externalTrafficPolicy: Local
+```
+
+---
+
 **Document Control**
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 1.0 | 2026-04-17 | Kilo | Initial HA requirements document |
+| 1.1 | 2026-04-17 | Kilo | Added WSGI & application server section |
+| 1.2 | 2026-04-17 | Kilo | Updated all references to use geopramtech project name |
