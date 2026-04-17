@@ -1,1 +1,1 @@
-web: gunicorn geopram_tech.wsgi --chdir .
+web: gunicorn src.geopram_tech.wsgi
