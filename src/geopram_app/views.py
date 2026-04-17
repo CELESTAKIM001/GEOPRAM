@@ -22,17 +22,25 @@ from django.db.models import Count
 
 
 def home(request):
-    visit, _ = SiteVisit.objects.get_or_create(id=1)
-    visit.visit_count = models.F("visit_count") + 1
-    visit.save(update_fields=["visit_count"])
+    from django.db.models import F
+
+    try:
+        visit, _ = SiteVisit.objects.get_or_create(id=1)
+        visit.visit_count = F("visit_count") + 1
+        visit.save(update_fields=["visit_count"])
+    except Exception:
+        pass
 
     if request.user.is_authenticated:
-        UserActivity.objects.create(
-            user=request.user,
-            activity_type="page_visit",
-            description=f"Visited home page",
-            ip_address=request.META.get("REMOTE_ADDR"),
-        )
+        try:
+            UserActivity.objects.create(
+                user=request.user,
+                activity_type="page_visit",
+                description=f"Visited home page",
+                ip_address=request.META.get("REMOTE_ADDR"),
+            )
+        except Exception:
+            pass
     return render(request, "home.html")
 
 
